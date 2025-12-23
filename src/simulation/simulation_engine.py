@@ -46,6 +46,7 @@ class SimulationEngine:
         self.missiles_missed = 0         # Engaged missiles that were not intercepted
         self.engaged_missiles = 0        # Missiles that entered Destroy phase
         self.engaged_missile_ids = set() # Track engaged missile IDs
+        self.missed_missiles = []        # List of missed missile events for visual feedback
         self.start_time = None
         
         # Interception time tracking per missile (simulation-time based, not wall-clock)
@@ -80,9 +81,9 @@ class SimulationEngine:
             }
         else:  # new
             self.phase_processing_delays = {
-                "Tracing": 0.2,    # 200ms to process detection
-                "Warning": 0.3,    # 300ms to calculate trajectory
-                "Destroy": 0.5     # 500ms to launch interceptor
+                "Tracing": 0.05,   # 50ms to process detection (much faster)
+                "Warning": 0.08,    # 80ms to calculate trajectory (much faster)
+                "Destroy": 0.15    # 150ms to launch interceptor (much faster)
             }
         
         # Phase statistics
@@ -166,6 +167,14 @@ class SimulationEngine:
         self.interceptors.clear()
         self.missiles_destroyed = 0
         self.interceptors_launched = 0
+        self.missiles_intercepted = 0
+        self.missiles_missed = 0
+        self.engaged_missiles = 0
+        self.engaged_missile_ids.clear()
+        if hasattr(self, 'missed_missiles'):
+            self.missed_missiles.clear()
+        else:
+            self.missed_missiles = []
         self.last_update_time = None
         
     def update(self):
@@ -182,24 +191,44 @@ class SimulationEngine:
         delta_time = (current_time - self.last_update_time) * self.simulation_speed
         self.last_update_time = current_time
         
-        # Continuous spawning - spawn new missiles periodically
-        if current_time - self.last_spawn_time >= self.spawn_interval:
-            if len(self.missiles) < self.max_concurrent_missiles:
-                # Use seed for synchronized spawning if available
-                spawn_seed = getattr(self, 'spawn_seed', None)
-                if spawn_seed is not None:
-                    # Increment seed for each spawn to keep synchronization
-                    spawn_seed = spawn_seed + int(current_time * 1000) % 1000000
-                self._spawn_single_missile(spawn_seed)
-                self.last_spawn_time = current_time
+        # Continuous spawning - maintain constant missile count
+        # Spawn new missiles immediately to maintain max_concurrent_missiles count
+        active_missile_count = len([m for m in self.missiles if m.active and not m.destroyed])
+        # Spawn immediately if below target count (no interval wait) - use while loop to fill up
+        while active_missile_count < self.max_concurrent_missiles:
+            # Use seed for synchronized spawning if available, but add variation for random positions
+            spawn_seed = getattr(self, 'spawn_seed', None)
+            if spawn_seed is not None:
+                # Add current time and missile count to ensure unique positions
+                # This keeps synchronization between old/new but ensures random positions
+                unique_seed = spawn_seed + active_missile_count + int(current_time * 1000) % 10000
+            else:
+                # No base seed - use completely random spawning
+                unique_seed = int(current_time * 1000) + active_missile_count + len(self.missiles)
+            self._spawn_single_missile(unique_seed)
+            self.last_spawn_time = current_time
+            active_missile_count = len([m for m in self.missiles if m.active and not m.destroyed])
         
         # Update missile phases first (needs current_time)
         self._update_phases(current_time)
         
         # Update missiles and track interception times (simulation-time based)
+        # Apply speed multiplier for new algorithm to make it visually faster
+        speed_multiplier = 1.0 if self.algorithm_type == "old" else 2.5  # New algorithm moves 2.5x faster
+        
         for missile in self.missiles[:]:  # Copy list to avoid modification during iteration
-            missile.update(delta_time)
+            missile.update(delta_time * speed_multiplier)
             missile_id = id(missile)
+            
+            # Check if missile reached center without interception (missed)
+            # Mark as destroyed so it gets processed in the destroyed check below
+            distance_to_center = np.linalg.norm(missile.position - self.defense_system_pos)
+            if distance_to_center < 2.0 and missile.active and not missile.destroyed:
+                # Missile reached center - mark as destroyed if it was engaged
+                if missile_id in self.engaged_missile_ids:
+                    missile.destroyed = True
+                    missile.active = False
+                    # Don't count here - will be counted in destroyed check below
 
             if missile.destroyed:
                 self.missiles_destroyed += 1
@@ -207,9 +236,20 @@ class SimulationEngine:
                 # If this missile was engaged (entered Destroy phase), classify as intercepted or missed
                 if missile_id in self.engaged_missile_ids:
                     if getattr(missile, "intercepted", False):
+                        # Successfully intercepted
                         self.missiles_intercepted += 1
                     else:
+                        # Missile was destroyed but not intercepted - it's a miss
+                        # (either reached center or was destroyed by reaching target without interception)
                         self.missiles_missed += 1
+                        # Store missed missile info for visual feedback (only for old algorithm)
+                        if self.algorithm_type == "old":
+                            if not hasattr(self, 'missed_missiles'):
+                                self.missed_missiles = []
+                            self.missed_missiles.append({
+                                'position': self.defense_system_pos.copy(),
+                                'time': time.time()
+                            })
                     self.engaged_missile_ids.discard(missile_id)
 
                 # Record interception time (elapsed seconds accumulated while running)
@@ -217,6 +257,18 @@ class SimulationEngine:
                     interception_time = self.current_interception_times[missile_id]
                     self.missile_interception_times[missile_id] = interception_time
                     del self.current_interception_times[missile_id]
+                
+                # Record tracing time if missile was destroyed while still in Tracing phase
+                # (missiles that are destroyed before transitioning to Warning)
+                if missile_id in self.missile_phase_times and "Tracing" in self.missile_phase_times[missile_id]:
+                    # Check if it never entered Warning phase
+                    if "Warning" not in self.missile_phase_times[missile_id]:
+                        tracing_start = self.missile_phase_times[missile_id]["Tracing"]
+                        # Use current_time from update loop (already defined above)
+                        tracing_time = current_time - tracing_start
+                        if tracing_time > 0:
+                            self.phase_response_times["Tracing"].append(tracing_time)
+                            print(f"[{self.algorithm_type}] Recorded tracing time: {tracing_time:.3f}s for destroyed missile")
 
             elif missile.detected:
                 # Advance current interception time for active detected missiles
@@ -236,9 +288,10 @@ class SimulationEngine:
             if mid in active_missile_ids
         }
         
-        # Update interceptors
+        # Update interceptors (apply speed multiplier for new algorithm)
+        speed_multiplier = 1.0 if self.algorithm_type == "old" else 2.5  # New algorithm interceptors move faster
         for interceptor in self.interceptors[:]:
-            interceptor.update(delta_time)
+            interceptor.update(delta_time * speed_multiplier)
             
         # Remove inactive interceptors
         self.interceptors = [i for i in self.interceptors if i.active]
@@ -263,6 +316,11 @@ class SimulationEngine:
         
         for i in range(count):
             # Spawn from random position far from center
+            # Add index to seed to ensure variation even with same base seed
+            if seed is not None:
+                # Re-seed with index variation for each missile
+                random.seed(seed + i * 1000)
+                np.random.seed(seed + i * 1000)
             angle = np.random.uniform(0, 2 * np.pi)  # Random angle
             distance = np.random.uniform(60.0, 90.0)  # Far from center (was 20.0)
             height = np.random.uniform(10.0, 25.0)  # Random height
@@ -297,7 +355,8 @@ class SimulationEngine:
         print(f"[{self.algorithm_type}] Spawned {count} missiles")
     
     def _spawn_single_missile(self, seed: int = None):
-        """Spawn a single missile for continuous spawning"""
+        """Spawn a single missile for continuous spawning with random position"""
+        # Pass seed directly to _spawn_missiles - it will handle randomization
         self._spawn_missiles(1, seed)
             
     def _update_phases(self, current_time: float):
@@ -328,6 +387,10 @@ class SimulationEngine:
                 # Start tracking interception time (elapsed seconds, begins at 0)
                 missile_id = id(missile)
                 self.current_interception_times[missile_id] = 0.0
+                # Track phase entry for Tracing (important for tracing time calculation)
+                if missile_id not in self.missile_phase_times:
+                    self.missile_phase_times[missile_id] = {}
+                self.missile_phase_times[missile_id]["Tracing"] = current_time
             
             if missile.detected:
                 missile_id = id(missile)
@@ -525,9 +588,8 @@ class SimulationEngine:
         # Calculate dynamic CPU usage based on active missiles and phases
         # Only change CPU when simulation is running
         if not self.is_running or self.is_paused:
-            # Return base CPU when not running
-            base_cpu = self.algorithm_config['cpu_overhead'] * 100
-            dynamic_cpu = base_cpu
+            # Return 0% CPU when not running (initial state)
+            dynamic_cpu = 0.0
         else:
             base_cpu = self.algorithm_config['cpu_overhead'] * 100
             
@@ -566,6 +628,14 @@ class SimulationEngine:
         engaged_for_ratio = max(1, self.engaged_missiles)
         logical_success_rate = (self.missiles_intercepted / engaged_for_ratio) * 100.0
 
+        # Count missiles in each phase for progress bars
+        missiles_in_tracing = len([m for m in self.missiles if m.active and not m.destroyed and m.phase == "Tracing"])
+        missiles_in_warning = len([m for m in self.missiles if m.active and not m.destroyed and m.phase == "Warning"])
+        missiles_in_destroy = len([m for m in self.missiles if m.active and not m.destroyed and m.phase == "Destroy"])
+        
+        # Threat limits: old = 15, new = 30
+        threat_limit = 15 if self.algorithm_type == "old" else 30
+
         return {
             'missiles_active': active_missiles,
             'missiles_destroyed': self.missiles_destroyed,
@@ -577,6 +647,10 @@ class SimulationEngine:
             'interceptors_launched': self.interceptors_launched,
             'success_rate': logical_success_rate,
             'phase_stats': self.phase_stats.copy(),
+            'missiles_in_tracing': missiles_in_tracing,
+            'missiles_in_warning': missiles_in_warning,
+            'missiles_in_destroy': missiles_in_destroy,
+            'threat_limit': threat_limit,
             'cpu_usage': dynamic_cpu,
             'response_times': avg_response_times,
             'total_response_time': total_response_time,

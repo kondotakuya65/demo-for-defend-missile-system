@@ -5,12 +5,29 @@ Metrics Export Utility
 import json
 import csv
 import os
+import numpy as np
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Any
 
 
 class MetricsExporter:
     """Export simulation metrics to CSV/JSON"""
+    
+    @staticmethod
+    def _convert_to_serializable(obj: Any) -> Any:
+        """Convert numpy types and other non-serializable types to native Python types"""
+        if isinstance(obj, (np.integer, np.floating)):
+            return float(obj) if isinstance(obj, np.floating) else int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: MetricsExporter._convert_to_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [MetricsExporter._convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, set):
+            return list(obj)
+        else:
+            return obj
     
     @staticmethod
     def export_json(metrics: Dict, filepath: str = None):
@@ -19,10 +36,13 @@ class MetricsExporter:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = f"metrics_export_{timestamp}.json"
         
+        # Convert numpy types to native Python types
+        serializable_metrics = MetricsExporter._convert_to_serializable(metrics)
+        
         # Prepare export data
         export_data = {
             "export_time": datetime.now().isoformat(),
-            "metrics": metrics
+            "metrics": serializable_metrics
         }
         
         with open(filepath, 'w', encoding='utf-8') as f:

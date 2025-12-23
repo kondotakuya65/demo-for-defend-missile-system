@@ -43,6 +43,7 @@ class RadarWidget(QWidget):
         
         # Explosion effects tracking
         self.explosions = []  # List of (position, time, max_age)
+        self.missed_missile_effects = []  # List of missed missile effects at center
         
     def paintEvent(self, event):
         """Paint the radar display"""
@@ -132,16 +133,70 @@ class RadarWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(QPointF(screen_x, screen_y), 4, 4)
         
+        # Check for new missed missiles and add visual effects (only for old algorithm)
+        if self.algorithm_type == "old":
+            if hasattr(self.simulation, 'missed_missiles') and self.simulation.missed_missiles:
+                for missed in self.simulation.missed_missiles[:]:
+                    # Add missed missile effect at center
+                    self.missed_missile_effects.append({
+                        'time': time.time(),
+                        'max_age': 3.0  # Show for 3 seconds
+                    })
+                # Clear the list after processing
+                self.simulation.missed_missiles.clear()
+        
+        # Draw missed missile effects at center
+        self.missed_missile_effects = [eff for eff in self.missed_missile_effects 
+                                       if current_time - eff['time'] < eff['max_age']]
+        for missed_eff in self.missed_missile_effects:
+            age = current_time - missed_eff['time']
+            progress = age / missed_eff['max_age']
+            
+            # Draw explosion at center
+            screen_x = center_x
+            screen_y = center_y
+            
+            # Draw multiple expanding rings (red for missed)
+            for ring in range(3):
+                ring_progress = (progress + ring * 0.2) % 1.0
+                size = 10 + ring_progress * 40
+                alpha = int(200 * (1.0 - ring_progress))
+                
+                # Red color for missed missile
+                color = QColor(255, 0, 0, alpha)
+                brush = QBrush(QColor(color.red(), color.green(), color.blue(), alpha // 2))
+                painter.setBrush(brush)
+                pen = QPen(color)
+                pen.setWidth(2)
+                painter.setPen(pen)
+                painter.drawEllipse(QPointF(screen_x, screen_y), size, size)
+            
+            # Draw "MISSILE MISSED" text
+            if progress < 0.7:  # Show text for first 70% of effect
+                font = QFont("Arial", 16, QFont.Weight.Bold)
+                painter.setFont(font)
+                text_alpha = int(255 * (1.0 - progress / 0.7))
+                pen = QPen(QColor(255, 0, 0, text_alpha))
+                painter.setPen(pen)
+                text = "MISSILE MISSED"
+                text_rect = painter.fontMetrics().boundingRect(text)
+                painter.drawText(
+                    int(center_x - text_rect.width() / 2),
+                    int(center_y - 30),
+                    text
+                )
+        
         # Draw interception time clocks and counters
         self._draw_interception_info(painter, width, height)
         
         # Draw legend/title
         self._draw_legend(painter, width, height)
         
-        # Update sweep angle
-        self.sweep_angle += self.sweep_speed
-        if self.sweep_angle >= 360:
-            self.sweep_angle -= 360
+        # Update sweep angle only if simulation is running
+        if self.simulation.is_running and not self.simulation.is_paused:
+            self.sweep_angle += self.sweep_speed
+            if self.sweep_angle >= 360:
+                self.sweep_angle -= 360
     
     def _draw_radar_grid(self, painter, center_x, center_y, radius):
         """Draw radar grid (concentric circles and lines)"""
@@ -464,10 +519,10 @@ class RadarWidget(QWidget):
         font = QFont("Arial", 10)
         painter.setFont(font)
         
-        # Title
-        title = f"{self.algorithm_type.upper()} Algorithm"
-        pen = QPen(QColor(0, 255, 0))
-        painter.setPen(pen)
+        # Title (commented out as it's shown in main window)
+        # title = "CONVENTIONAL APPROACH" if self.algorithm_type == "old" else "SA+H APPROACH"
+        # pen = QPen(QColor(0, 255, 0))
+        # painter.setPen(pen)
         # painter.drawText(10, 20, title)
         
         # Legend with phase colors

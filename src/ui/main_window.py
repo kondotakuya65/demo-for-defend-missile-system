@@ -13,6 +13,8 @@ from PyQt6.QtGui import QFont
 from src.ui.control_panel import ControlPanel
 from src.ui.metrics_panel import MetricsPanel
 from src.ui.radar_widget import RadarWidget
+from src.ui.performance_graph import PerformanceGraph
+import numpy as np
 
 
 class MainWindow(QMainWindow):
@@ -58,7 +60,7 @@ class MainWindow(QMainWindow):
         old_viz_layout = QVBoxLayout(old_viz_container)
         old_viz_layout.setContentsMargins(0, 0, 0, 0)
         
-        old_label = QLabel("OLD ALGORITHM")
+        old_label = QLabel("CONVENTIONAL APPROACH")
         old_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         old_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         old_label.setStyleSheet("background-color: #2b2b2b; color: #ff8800; padding: 2px;")
@@ -79,7 +81,7 @@ class MainWindow(QMainWindow):
         new_viz_layout = QVBoxLayout(new_viz_container)
         new_viz_layout.setContentsMargins(0, 0, 0, 0)
         
-        new_label = QLabel("NEW ALGORITHM")
+        new_label = QLabel("SA+H APPROACH")
         new_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         new_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
         new_label.setStyleSheet("background-color: #2b2b2b; color: #00ff00; padding: 2px;")
@@ -109,11 +111,27 @@ class MainWindow(QMainWindow):
         self.metrics_panel = MetricsPanel(self.config)
         main_layout.addWidget(self.metrics_panel, stretch=0)  # No stretch - fixed size
         
+        # Performance graphs (Bottom right)
+        graph_container = QWidget()
+        graph_layout = QHBoxLayout(graph_container)
+        graph_layout.setContentsMargins(5, 5, 5, 5)
+        graph_layout.setSpacing(10)
+        
+        self.old_graph = PerformanceGraph("old")
+        self.new_graph = PerformanceGraph("new")
+        graph_layout.addWidget(self.old_graph)
+        graph_layout.addWidget(self.new_graph)
+        
+        main_layout.addWidget(graph_container, stretch=0)  # Fixed size
+        
         # Connect control panel signals to simulation engines (after both widgets are created)
         def start_old_sim():
             # Generate new seed for synchronized spawning
             import random
             seed = random.randint(0, 1000000)
+            # Update max_concurrent_missiles before starting (except for saturation)
+            if self.current_scenario != "saturation":
+                self.old_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count
             print(f"Starting old simulation with {self.current_threat_count} threats (seed: {seed})...")
             self.old_radar_widget.simulation.start(self.current_threat_count, seed)
         def start_new_sim():
@@ -122,6 +140,9 @@ class MainWindow(QMainWindow):
             if seed is None:
                 import random
                 seed = random.randint(0, 1000000)
+            # Update max_concurrent_missiles before starting (except for saturation)
+            if self.current_scenario != "saturation":
+                self.new_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count
             print(f"Starting new simulation with {self.current_threat_count} threats (seed: {seed})...")
             self.new_radar_widget.simulation.start(self.current_threat_count, seed)
             
@@ -130,8 +151,29 @@ class MainWindow(QMainWindow):
         self.control_panel.start_simulation.connect(start_new_sim)
         self.control_panel.pause_simulation.connect(self.old_radar_widget.simulation.pause)
         self.control_panel.pause_simulation.connect(self.new_radar_widget.simulation.pause)
-        self.control_panel.reset_simulation.connect(self.old_radar_widget.simulation.reset)
-        self.control_panel.reset_simulation.connect(self.new_radar_widget.simulation.reset)
+        def reset_both_sims():
+            self.old_radar_widget.simulation.reset()
+            self.new_radar_widget.simulation.reset()
+            # Reset graph timing and clear graph data on reset
+            if hasattr(self, 'graph_start_time'):
+                delattr(self, 'graph_start_time')
+            if hasattr(self, 'graph_elapsed_time'):
+                delattr(self, 'graph_elapsed_time')
+            if hasattr(self, 'graph_update_counter'):
+                self.graph_update_counter = 0
+            # Reset last measurements to allow fresh start
+            if hasattr(self, 'last_measurements_old'):
+                delattr(self, 'last_measurements_old')
+            if hasattr(self, 'last_measurements_new'):
+                delattr(self, 'last_measurements_new')
+            # Clear graph data points
+            if hasattr(self, 'old_graph') and hasattr(self, 'new_graph'):
+                self.old_graph.data_points.clear()
+                self.new_graph.data_points.clear()
+                self.old_graph.update()
+                self.new_graph.update()
+        
+        self.control_panel.reset_simulation.connect(reset_both_sims)
         
         # Connect threat count slider
         self.control_panel.threat_count_changed.connect(self.on_threat_count_changed)
@@ -162,6 +204,10 @@ class MainWindow(QMainWindow):
     def on_threat_count_changed(self, count: int):
         """Handle threat count change"""
         self.current_threat_count = count
+        # Update max_concurrent_missiles immediately (except for saturation scenario)
+        if self.current_scenario != "saturation":
+            self.old_radar_widget.simulation.max_concurrent_missiles = count
+            self.new_radar_widget.simulation.max_concurrent_missiles = count
         # Update will apply on next start
     
     def on_speed_changed(self, speed: float):
@@ -174,14 +220,20 @@ class MainWindow(QMainWindow):
         """Handle scenario change"""
         self.current_scenario = scenario
         scenario_configs = {
-            "single": {"count": 1, "spawn_interval": 999.0},  # No continuous spawn
-            "wave": {"count": 5, "spawn_interval": 2.0},
-            "saturation": {"count": 15, "spawn_interval": 1.0},
-            "custom": {"count": self.current_threat_count, "spawn_interval": 3.0}
+            "single": {"count": self.current_threat_count, "spawn_interval": 999.0},  # Use threat count, no continuous spawn
+            "wave": {"count": self.current_threat_count, "spawn_interval": 2.0},  # Use threat count
+            "saturation": {"count": 15, "spawn_interval": 1.0},  # Fixed at 15 for saturation
+            "custom": {"count": self.current_threat_count, "spawn_interval": 3.0}  # Use threat count
         }
         
         config = scenario_configs.get(scenario, scenario_configs["custom"])
-        self.current_threat_count = config["count"]
+        # Only override count for saturation, otherwise use current_threat_count
+        if scenario != "saturation":
+            config["count"] = self.current_threat_count
+        
+        # Update max_concurrent_missiles to match threat count
+        self.old_radar_widget.simulation.max_concurrent_missiles = config["count"]
+        self.new_radar_widget.simulation.max_concurrent_missiles = config["count"]
         
         # Update spawn intervals for continuous spawning
         self.old_radar_widget.simulation.spawn_interval = config["spawn_interval"]
@@ -265,23 +317,38 @@ class MainWindow(QMainWindow):
         old_stats = self.old_radar_widget.simulation.get_statistics()
         old_phase_stats = old_stats.get('phase_stats', {})
         
+        # Update progress bars as percentage: (missiles in phase / threat limit) * 100
+        old_threat_limit = old_stats.get('threat_limit', 15)
         if hasattr(self, 'old_tracing_progress'):
-            self.old_tracing_progress.setValue(int(old_phase_stats.get('Tracing', {}).get('progress', 0)))
+            missiles_in_tracing = old_stats.get('missiles_in_tracing', 0)
+            progress = int((missiles_in_tracing / old_threat_limit) * 100) if old_threat_limit > 0 else 0
+            self.old_tracing_progress.setValue(min(100, progress))
         if hasattr(self, 'old_warning_progress'):
-            self.old_warning_progress.setValue(int(old_phase_stats.get('Warning', {}).get('progress', 0)))
+            missiles_in_warning = old_stats.get('missiles_in_warning', 0)
+            progress = int((missiles_in_warning / old_threat_limit) * 100) if old_threat_limit > 0 else 0
+            self.old_warning_progress.setValue(min(100, progress))
         if hasattr(self, 'old_destroy_progress'):
-            self.old_destroy_progress.setValue(int(old_phase_stats.get('Destroy', {}).get('progress', 0)))
+            missiles_in_destroy = old_stats.get('missiles_in_destroy', 0)
+            progress = int((missiles_in_destroy / old_threat_limit) * 100) if old_threat_limit > 0 else 0
+            self.old_destroy_progress.setValue(min(100, progress))
         
         # Update new algorithm phases
         new_stats = self.new_radar_widget.simulation.get_statistics()
         new_phase_stats = new_stats.get('phase_stats', {})
         
+        new_threat_limit = new_stats.get('threat_limit', 30)
         if hasattr(self, 'new_tracing_progress'):
-            self.new_tracing_progress.setValue(int(new_phase_stats.get('Tracing', {}).get('progress', 0)))
+            missiles_in_tracing = new_stats.get('missiles_in_tracing', 0)
+            progress = int((missiles_in_tracing / new_threat_limit) * 100) if new_threat_limit > 0 else 0
+            self.new_tracing_progress.setValue(min(100, progress))
         if hasattr(self, 'new_warning_progress'):
-            self.new_warning_progress.setValue(int(new_phase_stats.get('Warning', {}).get('progress', 0)))
+            missiles_in_warning = new_stats.get('missiles_in_warning', 0)
+            progress = int((missiles_in_warning / new_threat_limit) * 100) if new_threat_limit > 0 else 0
+            self.new_warning_progress.setValue(min(100, progress))
         if hasattr(self, 'new_destroy_progress'):
-            self.new_destroy_progress.setValue(int(new_phase_stats.get('Destroy', {}).get('progress', 0)))
+            missiles_in_destroy = new_stats.get('missiles_in_destroy', 0)
+            progress = int((missiles_in_destroy / new_threat_limit) * 100) if new_threat_limit > 0 else 0
+            self.new_destroy_progress.setValue(min(100, progress))
         
         # Update metrics panel
         self.metrics_panel.update_cpu_usage(
@@ -302,6 +369,67 @@ class MainWindow(QMainWindow):
             old_stats.get('response_times', {}),
             new_stats.get('response_times', {})
         )
+        
+        # Update performance graphs with fake data showing SA+H is much faster
+        # Only update when simulations are running (not paused)
+        old_running = self.old_radar_widget.simulation.is_running and not self.old_radar_widget.simulation.is_paused
+        new_running = self.new_radar_widget.simulation.is_running and not self.new_radar_widget.simulation.is_paused
+        
+        # Only update graphs if at least one simulation is actively running
+        if hasattr(self, 'old_graph') and hasattr(self, 'new_graph') and (old_running or new_running):
+            # Simulate measurements per scan (increasing over time)
+            import time
+            if hasattr(self, 'graph_start_time'):
+                # Only advance time when simulation is running
+                elapsed = time.time() - self.graph_start_time
+                self.graph_elapsed_time = elapsed
+            else:
+                self.graph_start_time = time.time()
+                elapsed = 0
+                self.graph_elapsed_time = 0
+            
+            # Simulate measurements per scan (50 to 5000)
+            # Make measurements increase continuously over time with smooth progression
+            base_measurements = 50 + self.graph_elapsed_time * 10
+            
+            # Start from last measurement if available, otherwise use base
+            # Allow measurements to exceed 5000 - graph will auto-scale
+            if hasattr(self, 'last_measurements_old'):
+                # Continue from last point with small incremental increase
+                measurements_old = self.last_measurements_old + np.random.uniform(5, 15)
+            else:
+                measurements_old = base_measurements + np.random.uniform(-10, 10)
+            
+            if hasattr(self, 'last_measurements_new'):
+                measurements_new = self.last_measurements_new + np.random.uniform(5, 15)
+            else:
+                measurements_new = base_measurements + np.random.uniform(-10, 10)
+            
+            self.last_measurements_old = measurements_old
+            self.last_measurements_new = measurements_new
+            
+            # Simulate latency (log scale, SA+H is much faster)
+            # Conventional: higher latency, increases with measurements
+            latency_old = 50 + (measurements_old / 100) * 2 + np.random.uniform(-5, 5)
+            latency_old = max(10, min(800, latency_old))
+            
+            # SA+H: much lower latency, scales better
+            latency_new = 5 + (measurements_new / 1000) * 1 + np.random.uniform(-1, 1)
+            latency_new = max(1, min(50, latency_new))
+            
+            # Add data points every few updates (only when running)
+            if not hasattr(self, 'graph_update_counter'):
+                self.graph_update_counter = 0
+            self.graph_update_counter += 1
+            
+            if self.graph_update_counter % 10 == 0:  # Update every 10 frames
+                self.old_graph.add_data_point(measurements_old, latency_old)
+                self.new_graph.add_data_point(measurements_new, latency_new)
+        elif hasattr(self, 'old_graph') and hasattr(self, 'new_graph'):
+            # Reset graph start time when simulation stops
+            if hasattr(self, 'graph_start_time'):
+                # Don't reset, just keep it frozen
+                pass
         
     def create_phase_indicators(self, algorithm_type):
         """Create phase indicator layout - compact version"""

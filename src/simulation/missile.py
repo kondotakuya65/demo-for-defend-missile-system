@@ -39,12 +39,16 @@ class Missile:
         
         # Pattern-specific parameters
         self.pattern_time = 0.0
+        # Add per-missile variation for more realistic paths
+        import random
+        self.pattern_variation = random.uniform(0.7, 1.3)  # Variation factor per missile
         if movement_pattern == "zigzag":
-            self.zigzag_amplitude = 5.0
-            self.zigzag_frequency = 2.0
+            # Reduced frequency and amplitude for fewer, more varied turns
+            self.zigzag_amplitude = 3.0 + random.uniform(-1.0, 1.0)  # 2-4
+            self.zigzag_frequency = 0.5 + random.uniform(-0.2, 0.2)  # 0.3-0.7 (slower, fewer turns)
         elif movement_pattern == "spiral":
-            self.spiral_radius = 3.0
-            self.spiral_frequency = 1.5
+            self.spiral_radius = 3.0 + random.uniform(-1.0, 1.0)
+            self.spiral_frequency = 1.0 + random.uniform(-0.3, 0.3)  # Slower, more varied
         elif movement_pattern == "curved":
             self.curve_amplitude = 8.0
             self.curve_frequency = 1.0
@@ -99,7 +103,7 @@ class Missile:
             else:
                 self.velocity = self.base_velocity.copy()
         elif self.movement_pattern == "zigzag":
-            # Zigzag pattern - alternating side-to-side
+            # Zigzag pattern - alternating side-to-side with variation
             direction_to_target = self.target - self.position
             distance_to_target = np.linalg.norm(direction_to_target)
             if distance_to_target > 0.1:
@@ -109,9 +113,13 @@ class Missile:
                 if np.linalg.norm(perp) < 0.1:
                     perp = np.cross(base_dir, np.array([1, 0, 0]))
                 perp = perp / np.linalg.norm(perp)
-                # Alternating side movement
-                zigzag_offset = np.sign(np.sin(self.pattern_time * self.zigzag_frequency)) * self.zigzag_amplitude * perp
-                zigzag_dir = base_dir + zigzag_offset * 0.15
+                # Alternating side movement with variation factor
+                # Use slower frequency and add some randomness
+                freq = self.zigzag_frequency * self.pattern_variation
+                zigzag_offset = np.sign(np.sin(self.pattern_time * freq)) * self.zigzag_amplitude * perp
+                # Add slight random variation to make it less regular
+                zigzag_offset = zigzag_offset * (0.8 + 0.4 * np.sin(self.pattern_time * 0.3))
+                zigzag_dir = base_dir + zigzag_offset * 0.12  # Reduced from 0.15
                 zigzag_dir = zigzag_dir / np.linalg.norm(zigzag_dir)
                 self.velocity = zigzag_dir * self.speed
             else:

@@ -26,8 +26,8 @@
     "default_speed": 1.0,
     "interceptor_speed_multiplier": 2.5,
     "detection_range": 100.0,
-    "tracing_range": 80.0,
-    "warning_range": 50.0,
+    "tracing_range": 70.0,
+    "warning_range": 40.0,
     "destroy_range": 30.0,
     "success_threshold": 3.0,
     "max_interceptors_per_threat": 2
