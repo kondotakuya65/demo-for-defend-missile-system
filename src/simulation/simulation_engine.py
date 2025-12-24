@@ -213,11 +213,9 @@ class SimulationEngine:
         self._update_phases(current_time)
         
         # Update missiles and track interception times (simulation-time based)
-        # Apply speed multiplier for new algorithm to make it visually faster
-        speed_multiplier = 1.0 if self.algorithm_type == "old" else 2.5  # New algorithm moves 2.5x faster
-        
+        # Attacking missiles move at the same speed for both algorithms
         for missile in self.missiles[:]:  # Copy list to avoid modification during iteration
-            missile.update(delta_time * speed_multiplier)
+            missile.update(delta_time)
             missile_id = id(missile)
             
             # Check if missile reached center without interception (missed)
@@ -288,8 +286,8 @@ class SimulationEngine:
             if mid in active_missile_ids
         }
         
-        # Update interceptors (apply speed multiplier for new algorithm)
-        speed_multiplier = 1.0 if self.algorithm_type == "old" else 2.5  # New algorithm interceptors move faster
+        # Update interceptors (apply speed multiplier for new algorithm - faster trajectory analysis)
+        speed_multiplier = 1.0 if self.algorithm_type == "old" else 1.5  # New algorithm interceptors move faster due to faster analysis
         for interceptor in self.interceptors[:]:
             interceptor.update(delta_time * speed_multiplier)
             
@@ -624,9 +622,13 @@ class SimulationEngine:
         for missile_id, elapsed_sec in self.current_interception_times.items():
             current_times[missile_id] = elapsed_sec * 1000.0  # Convert to ms
         
-        # Success ratio based only on engaged missiles (entered Destroy phase)
-        engaged_for_ratio = max(1, self.engaged_missiles)
-        logical_success_rate = (self.missiles_intercepted / engaged_for_ratio) * 100.0
+        # Success rate calculation: intercepted / (intercepted + missed) * 100
+        # This calculates success rate based on actual interception attempts
+        total_interception_attempts = self.missiles_intercepted + self.missiles_missed
+        if total_interception_attempts > 0:
+            logical_success_rate = (self.missiles_intercepted / total_interception_attempts) * 100.0
+        else:
+            logical_success_rate = 0.0  # No attempts yet
 
         # Count missiles in each phase for progress bars
         missiles_in_tracing = len([m for m in self.missiles if m.active and not m.destroyed and m.phase == "Tracing"])

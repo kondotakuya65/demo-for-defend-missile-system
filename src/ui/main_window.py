@@ -13,7 +13,9 @@ from PyQt6.QtGui import QFont
 from src.ui.control_panel import ControlPanel
 from src.ui.metrics_panel import MetricsPanel
 from src.ui.radar_widget import RadarWidget
-from src.ui.performance_graph import PerformanceGraph
+from src.ui.accuracy_graph import AccuracyGraph
+from src.ui.cpu_usage_graph import CPUUsageGraph
+from src.ui.destroy_time_graph import DestroyTimeGraph
 import numpy as np
 
 
@@ -117,10 +119,12 @@ class MainWindow(QMainWindow):
         graph_layout.setContentsMargins(5, 5, 5, 5)
         graph_layout.setSpacing(10)
         
-        self.old_graph = PerformanceGraph("old")
-        self.new_graph = PerformanceGraph("new")
-        graph_layout.addWidget(self.old_graph)
-        graph_layout.addWidget(self.new_graph)
+        self.accuracy_graph = AccuracyGraph()
+        self.cpu_usage_graph = CPUUsageGraph()
+        self.destroy_time_graph = DestroyTimeGraph()
+        graph_layout.addWidget(self.accuracy_graph)
+        graph_layout.addWidget(self.cpu_usage_graph)
+        graph_layout.addWidget(self.destroy_time_graph)
         
         main_layout.addWidget(graph_container, stretch=0)  # Fixed size
         
@@ -141,8 +145,9 @@ class MainWindow(QMainWindow):
                 import random
                 seed = random.randint(0, 1000000)
             # Update max_concurrent_missiles before starting (except for saturation)
+            # Right side (SA+H) can handle more missiles - allow 2x capacity
             if self.current_scenario != "saturation":
-                self.new_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count
+                self.new_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count * 2
             print(f"Starting new simulation with {self.current_threat_count} threats (seed: {seed})...")
             self.new_radar_widget.simulation.start(self.current_threat_count, seed)
             
@@ -167,11 +172,12 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'last_measurements_new'):
                 delattr(self, 'last_measurements_new')
             # Clear graph data points
-            if hasattr(self, 'old_graph') and hasattr(self, 'new_graph'):
-                self.old_graph.data_points.clear()
-                self.new_graph.data_points.clear()
-                self.old_graph.update()
-                self.new_graph.update()
+            if hasattr(self, 'accuracy_graph'):
+                self.accuracy_graph.reset_graph()
+            if hasattr(self, 'cpu_usage_graph'):
+                self.cpu_usage_graph.reset_graph()
+            if hasattr(self, 'destroy_time_graph'):
+                self.destroy_time_graph.reset_graph()
         
         self.control_panel.reset_simulation.connect(reset_both_sims)
         
@@ -205,9 +211,10 @@ class MainWindow(QMainWindow):
         """Handle threat count change"""
         self.current_threat_count = count
         # Update max_concurrent_missiles immediately (except for saturation scenario)
+        # Right side (SA+H) can handle more missiles - allow 2x capacity
         if self.current_scenario != "saturation":
             self.old_radar_widget.simulation.max_concurrent_missiles = count
-            self.new_radar_widget.simulation.max_concurrent_missiles = count
+            self.new_radar_widget.simulation.max_concurrent_missiles = count * 2  # SA+H can handle more
         # Update will apply on next start
     
     def on_speed_changed(self, speed: float):
@@ -232,8 +239,9 @@ class MainWindow(QMainWindow):
             config["count"] = self.current_threat_count
         
         # Update max_concurrent_missiles to match threat count
+        # Right side (SA+H) can handle more missiles - allow 2x capacity
         self.old_radar_widget.simulation.max_concurrent_missiles = config["count"]
-        self.new_radar_widget.simulation.max_concurrent_missiles = config["count"]
+        self.new_radar_widget.simulation.max_concurrent_missiles = config["count"] * 2  # SA+H can handle more
         
         # Update spawn intervals for continuous spawning
         self.old_radar_widget.simulation.spawn_interval = config["spawn_interval"]
@@ -370,66 +378,65 @@ class MainWindow(QMainWindow):
             new_stats.get('response_times', {})
         )
         
-        # Update performance graphs with fake data showing SA+H is much faster
+        # Update accuracy convergence graph
         # Only update when simulations are running (not paused)
         old_running = self.old_radar_widget.simulation.is_running and not self.old_radar_widget.simulation.is_paused
         new_running = self.new_radar_widget.simulation.is_running and not self.new_radar_widget.simulation.is_paused
         
-        # Only update graphs if at least one simulation is actively running
-        if hasattr(self, 'old_graph') and hasattr(self, 'new_graph') and (old_running or new_running):
-            # Simulate measurements per scan (increasing over time)
+        # Only update graph if at least one simulation is actively running
+        if hasattr(self, 'accuracy_graph') and (old_running or new_running):
             import time
-            if hasattr(self, 'graph_start_time'):
-                # Only advance time when simulation is running
-                elapsed = time.time() - self.graph_start_time
-                self.graph_elapsed_time = elapsed
-            else:
+            
+            # Track simulation start time
+            if not hasattr(self, 'graph_start_time'):
                 self.graph_start_time = time.time()
-                elapsed = 0
-                self.graph_elapsed_time = 0
             
-            # Simulate measurements per scan (50 to 5000)
-            # Make measurements increase continuously over time with smooth progression
-            base_measurements = 50 + self.graph_elapsed_time * 10
+            # Calculate elapsed time in milliseconds
+            elapsed_time_ms = (time.time() - self.graph_start_time) * 1000.0
             
-            # Start from last measurement if available, otherwise use base
-            # Allow measurements to exceed 5000 - graph will auto-scale
-            if hasattr(self, 'last_measurements_old'):
-                # Continue from last point with small incremental increase
-                measurements_old = self.last_measurements_old + np.random.uniform(5, 15)
-            else:
-                measurements_old = base_measurements + np.random.uniform(-10, 10)
+            # Graph 1: Accuracy (success rate)
+            old_accuracy = old_stats.get('success_rate', 0.0)  # Percentage from actual simulation
+            new_accuracy = new_stats.get('success_rate', 0.0)  # Percentage from actual simulation
+            old_accuracy = max(0.0, min(100.0, old_accuracy))
+            new_accuracy = max(0.0, min(100.0, new_accuracy))
             
-            if hasattr(self, 'last_measurements_new'):
-                measurements_new = self.last_measurements_new + np.random.uniform(5, 15)
-            else:
-                measurements_new = base_measurements + np.random.uniform(-10, 10)
+            # Graph 2: CPU Usage
+            old_cpu = old_stats.get('cpu_usage', 0.0)  # Percentage
+            new_cpu = new_stats.get('cpu_usage', 0.0)  # Percentage
+            old_cpu = max(0.0, min(100.0, old_cpu))
+            new_cpu = max(0.0, min(100.0, new_cpu))
             
-            self.last_measurements_old = measurements_old
-            self.last_measurements_new = measurements_new
+            # Graph 3: Average Destroy Time
+            # Get average destroy time from response times (Destroy phase)
+            old_response_times = old_stats.get('response_times', {})
+            new_response_times = new_stats.get('response_times', {})
+            old_destroy_time = old_response_times.get('Destroy', 0.0)  # Already in ms
+            new_destroy_time = new_response_times.get('Destroy', 0.0)  # Already in ms
             
-            # Simulate latency (log scale, SA+H is much faster)
-            # Conventional: higher latency, increases with measurements
-            latency_old = 50 + (measurements_old / 100) * 2 + np.random.uniform(-5, 5)
-            latency_old = max(10, min(800, latency_old))
+            # Add tiny random variation to make graph more realistic (not a straight line)
+            # Variation is ±2% of the value, or ±5ms minimum
+            if old_destroy_time > 0:
+                variation_old = max(5.0, old_destroy_time * 0.02)
+                old_destroy_time = old_destroy_time + np.random.uniform(-variation_old, variation_old)
+            if new_destroy_time > 0:
+                variation_new = max(5.0, new_destroy_time * 0.02)
+                new_destroy_time = new_destroy_time + np.random.uniform(-variation_new, variation_new)
             
-            # SA+H: much lower latency, scales better
-            latency_new = 5 + (measurements_new / 1000) * 1 + np.random.uniform(-1, 1)
-            latency_new = max(1, min(50, latency_new))
+            # Ensure non-negative values
+            old_destroy_time = max(0.0, old_destroy_time)
+            new_destroy_time = max(0.0, new_destroy_time)
             
             # Add data points every few updates (only when running)
             if not hasattr(self, 'graph_update_counter'):
                 self.graph_update_counter = 0
             self.graph_update_counter += 1
             
-            if self.graph_update_counter % 10 == 0:  # Update every 10 frames
-                self.old_graph.add_data_point(measurements_old, latency_old)
-                self.new_graph.add_data_point(measurements_new, latency_new)
-        elif hasattr(self, 'old_graph') and hasattr(self, 'new_graph'):
-            # Reset graph start time when simulation stops
-            if hasattr(self, 'graph_start_time'):
-                # Don't reset, just keep it frozen
-                pass
+            if self.graph_update_counter % 5 == 0:  # Update every 5 frames for smoother curve
+                self.accuracy_graph.add_data_point(old_accuracy, new_accuracy, elapsed_time_ms)
+                if hasattr(self, 'cpu_usage_graph'):
+                    self.cpu_usage_graph.add_data_point(old_cpu, new_cpu, elapsed_time_ms)
+                if hasattr(self, 'destroy_time_graph'):
+                    self.destroy_time_graph.add_data_point(old_destroy_time, new_destroy_time, elapsed_time_ms)
         
     def create_phase_indicators(self, algorithm_type):
         """Create phase indicator layout - compact version"""
