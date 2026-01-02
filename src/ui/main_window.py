@@ -13,9 +13,7 @@ from PyQt6.QtGui import QFont
 from src.ui.control_panel import ControlPanel
 from src.ui.metrics_panel import MetricsPanel
 from src.ui.radar_widget import RadarWidget
-from src.ui.accuracy_graph import AccuracyGraph
-from src.ui.cpu_usage_graph import CPUUsageGraph
-from src.ui.destroy_time_graph import DestroyTimeGraph
+from src.ui.processing_performance_graph import ProcessingPerformanceGraph
 import numpy as np
 
 
@@ -113,20 +111,13 @@ class MainWindow(QMainWindow):
         self.metrics_panel = MetricsPanel(self.config)
         main_layout.addWidget(self.metrics_panel, stretch=0)  # No stretch - fixed size
         
-        # Performance graphs (Bottom right)
-        graph_container = QWidget()
-        graph_layout = QHBoxLayout(graph_container)
-        graph_layout.setContentsMargins(5, 5, 5, 5)
-        graph_layout.setSpacing(10)
+        # Processing Performance Graph (Bottom) - Large area for key demonstration
+        self.processing_graph = ProcessingPerformanceGraph()
+        main_layout.addWidget(self.processing_graph, stretch=0)  # Fixed size but larger
         
-        self.accuracy_graph = AccuracyGraph()
-        self.cpu_usage_graph = CPUUsageGraph()
-        self.destroy_time_graph = DestroyTimeGraph()
-        graph_layout.addWidget(self.accuracy_graph)
-        graph_layout.addWidget(self.cpu_usage_graph)
-        graph_layout.addWidget(self.destroy_time_graph)
-        
-        main_layout.addWidget(graph_container, stretch=0)  # Fixed size
+        # Initialize threat type in both simulation engines
+        self.old_radar_widget.simulation.threat_type = "missiles"
+        self.new_radar_widget.simulation.threat_type = "missiles"
         
         # Connect control panel signals to simulation engines (after both widgets are created)
         def start_old_sim():
@@ -145,9 +136,9 @@ class MainWindow(QMainWindow):
                 import random
                 seed = random.randint(0, 1000000)
             # Update max_concurrent_missiles before starting (except for saturation)
-            # Right side (SA+H) can handle more missiles - allow 2x capacity
+            # Both sides should have the same count for fair comparison
             if self.current_scenario != "saturation":
-                self.new_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count * 2
+                self.new_radar_widget.simulation.max_concurrent_missiles = self.current_threat_count
             print(f"Starting new simulation with {self.current_threat_count} threats (seed: {seed})...")
             self.new_radar_widget.simulation.start(self.current_threat_count, seed)
             
@@ -172,12 +163,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'last_measurements_new'):
                 delattr(self, 'last_measurements_new')
             # Clear graph data points
-            if hasattr(self, 'accuracy_graph'):
-                self.accuracy_graph.reset_graph()
-            if hasattr(self, 'cpu_usage_graph'):
-                self.cpu_usage_graph.reset_graph()
-            if hasattr(self, 'destroy_time_graph'):
-                self.destroy_time_graph.reset_graph()
+            if hasattr(self, 'processing_graph'):
+                self.processing_graph.reset_graph()
         
         self.control_panel.reset_simulation.connect(reset_both_sims)
         
@@ -189,6 +176,12 @@ class MainWindow(QMainWindow):
         
         # Connect scenario selector
         self.control_panel.scenario_changed.connect(self.on_scenario_changed)
+        
+        # Connect threat type selector
+        self.control_panel.threat_type_changed.connect(self.on_threat_type_changed)
+        
+        # Connect movement type selector (for custom scenario)
+        self.control_panel.movement_type_changed.connect(self.on_movement_type_changed)
         
         # Connect export button
         self.control_panel.export_metrics.connect(self.on_export_metrics)
@@ -204,6 +197,8 @@ class MainWindow(QMainWindow):
         
         # Store current scenario settings
         self.current_threat_count = self.config['simulation']['default_threat_count']
+        self.current_threat_type = "missiles"  # Default to missiles
+        self.current_movement_type = "straight"  # Default movement type for custom scenario
         self.current_speed = 1.0
         self.current_scenario = "custom"
     
@@ -211,11 +206,26 @@ class MainWindow(QMainWindow):
         """Handle threat count change"""
         self.current_threat_count = count
         # Update max_concurrent_missiles immediately (except for saturation scenario)
-        # Right side (SA+H) can handle more missiles - allow 2x capacity
+        # Both sides should have the same count for fair comparison
         if self.current_scenario != "saturation":
             self.old_radar_widget.simulation.max_concurrent_missiles = count
-            self.new_radar_widget.simulation.max_concurrent_missiles = count * 2  # SA+H can handle more
+            self.new_radar_widget.simulation.max_concurrent_missiles = count  # Same count for comparison
         # Update will apply on next start
+    
+    def on_threat_type_changed(self, threat_type: str):
+        """Handle threat type change"""
+        self.current_threat_type = threat_type
+        # Update threat type in both simulation engines
+        self.old_radar_widget.simulation.threat_type = threat_type
+        self.new_radar_widget.simulation.threat_type = threat_type
+    
+    def on_movement_type_changed(self, movement_type: str):
+        """Handle movement type change (for custom scenario)"""
+        self.current_movement_type = movement_type
+        # Update movement pattern for custom scenario in both simulation engines
+        if self.current_scenario == "custom":
+            self.old_radar_widget.simulation.custom_movement_pattern = movement_type
+            self.new_radar_widget.simulation.custom_movement_pattern = movement_type
     
     def on_speed_changed(self, speed: float):
         """Handle speed change"""
@@ -239,9 +249,9 @@ class MainWindow(QMainWindow):
             config["count"] = self.current_threat_count
         
         # Update max_concurrent_missiles to match threat count
-        # Right side (SA+H) can handle more missiles - allow 2x capacity
+        # Both sides should have the same number of threats for fair comparison
         self.old_radar_widget.simulation.max_concurrent_missiles = config["count"]
-        self.new_radar_widget.simulation.max_concurrent_missiles = config["count"] * 2  # SA+H can handle more
+        self.new_radar_widget.simulation.max_concurrent_missiles = config["count"]  # Same count for comparison
         
         # Update spawn intervals for continuous spawning
         self.old_radar_widget.simulation.spawn_interval = config["spawn_interval"]
@@ -250,6 +260,11 @@ class MainWindow(QMainWindow):
         # Update scenario type for movement patterns
         self.old_radar_widget.simulation.current_scenario = scenario
         self.new_radar_widget.simulation.current_scenario = scenario
+        
+        # If custom scenario, update movement pattern
+        if scenario == "custom":
+            self.old_radar_widget.simulation.custom_movement_pattern = self.current_movement_type
+            self.new_radar_widget.simulation.custom_movement_pattern = self.current_movement_type
     
     def on_export_metrics(self):
         """Handle metrics export"""
@@ -378,53 +393,21 @@ class MainWindow(QMainWindow):
             new_stats.get('response_times', {})
         )
         
-        # Update accuracy convergence graph
+        # Update Processing Performance Graph
         # Only update when simulations are running (not paused)
         old_running = self.old_radar_widget.simulation.is_running and not self.old_radar_widget.simulation.is_paused
         new_running = self.new_radar_widget.simulation.is_running and not self.new_radar_widget.simulation.is_paused
         
         # Only update graph if at least one simulation is actively running
-        if hasattr(self, 'accuracy_graph') and (old_running or new_running):
+        if hasattr(self, 'processing_graph') and (old_running or new_running):
             import time
             
-            # Track simulation start time
+            # Track simulation start time for graph
             if not hasattr(self, 'graph_start_time'):
                 self.graph_start_time = time.time()
             
             # Calculate elapsed time in milliseconds
             elapsed_time_ms = (time.time() - self.graph_start_time) * 1000.0
-            
-            # Graph 1: Accuracy (success rate)
-            old_accuracy = old_stats.get('success_rate', 0.0)  # Percentage from actual simulation
-            new_accuracy = new_stats.get('success_rate', 0.0)  # Percentage from actual simulation
-            old_accuracy = max(0.0, min(100.0, old_accuracy))
-            new_accuracy = max(0.0, min(100.0, new_accuracy))
-            
-            # Graph 2: CPU Usage
-            old_cpu = old_stats.get('cpu_usage', 0.0)  # Percentage
-            new_cpu = new_stats.get('cpu_usage', 0.0)  # Percentage
-            old_cpu = max(0.0, min(100.0, old_cpu))
-            new_cpu = max(0.0, min(100.0, new_cpu))
-            
-            # Graph 3: Average Destroy Time
-            # Get average destroy time from response times (Destroy phase)
-            old_response_times = old_stats.get('response_times', {})
-            new_response_times = new_stats.get('response_times', {})
-            old_destroy_time = old_response_times.get('Destroy', 0.0)  # Already in ms
-            new_destroy_time = new_response_times.get('Destroy', 0.0)  # Already in ms
-            
-            # Add tiny random variation to make graph more realistic (not a straight line)
-            # Variation is ±2% of the value, or ±5ms minimum
-            if old_destroy_time > 0:
-                variation_old = max(5.0, old_destroy_time * 0.02)
-                old_destroy_time = old_destroy_time + np.random.uniform(-variation_old, variation_old)
-            if new_destroy_time > 0:
-                variation_new = max(5.0, new_destroy_time * 0.02)
-                new_destroy_time = new_destroy_time + np.random.uniform(-variation_new, variation_new)
-            
-            # Ensure non-negative values
-            old_destroy_time = max(0.0, old_destroy_time)
-            new_destroy_time = max(0.0, new_destroy_time)
             
             # Add data points every few updates (only when running)
             if not hasattr(self, 'graph_update_counter'):
@@ -432,11 +415,15 @@ class MainWindow(QMainWindow):
             self.graph_update_counter += 1
             
             if self.graph_update_counter % 5 == 0:  # Update every 5 frames for smoother curve
-                self.accuracy_graph.add_data_point(old_accuracy, new_accuracy, elapsed_time_ms)
-                if hasattr(self, 'cpu_usage_graph'):
-                    self.cpu_usage_graph.add_data_point(old_cpu, new_cpu, elapsed_time_ms)
-                if hasattr(self, 'destroy_time_graph'):
-                    self.destroy_time_graph.add_data_point(old_destroy_time, new_destroy_time, elapsed_time_ms)
+                # Pass movement_type for custom scenario
+                movement_type = self.current_movement_type if self.current_scenario == "custom" else "straight"
+                self.processing_graph.add_data_point(
+                    self.current_scenario,
+                    self.current_threat_count,
+                    self.current_threat_type,
+                    movement_type,
+                    elapsed_time_ms
+                )
         
     def create_phase_indicators(self, algorithm_type):
         """Create phase indicator layout - compact version"""

@@ -18,6 +18,8 @@ class ControlPanel(QWidget):
     pause_simulation = pyqtSignal()
     reset_simulation = pyqtSignal()
     threat_count_changed = pyqtSignal(int)
+    threat_type_changed = pyqtSignal(str)  # "missiles" or "drones"
+    movement_type_changed = pyqtSignal(str)  # "straight" or "zigzag" (for custom scenario)
     speed_changed = pyqtSignal(float)
     scenario_changed = pyqtSignal(str)
     export_metrics = pyqtSignal()
@@ -80,6 +82,20 @@ class ControlPanel(QWidget):
         threat_group.setLayout(threat_layout)
         layout.addWidget(threat_group)
         
+        # Threat Type Group (separate frame)
+        threat_type_group = QGroupBox("Threat Type")
+        threat_type_layout = QHBoxLayout()
+        
+        threat_type_layout.addWidget(QLabel("Type:"))
+        
+        self.threat_type_combo = QComboBox()
+        self.threat_type_combo.addItems(["Missiles", "Drones"])
+        self.threat_type_combo.currentTextChanged.connect(self.on_threat_type_changed)
+        threat_type_layout.addWidget(self.threat_type_combo)
+        
+        threat_type_group.setLayout(threat_type_layout)
+        layout.addWidget(threat_type_group)
+        
         # Simulation Speed Group
         speed_group = QGroupBox("Simulation Speed")
         speed_layout = QHBoxLayout()
@@ -122,6 +138,21 @@ class ControlPanel(QWidget):
         
         scenario_group.setLayout(scenario_layout)
         layout.addWidget(scenario_group)
+        
+        # Movement Type Group (only enabled for Custom scenario)
+        movement_type_group = QGroupBox("Movement Type")
+        movement_type_layout = QHBoxLayout()
+        
+        movement_type_layout.addWidget(QLabel("Type:"))
+        
+        self.movement_type_combo = QComboBox()
+        self.movement_type_combo.addItems(["Straight Line", "Zigzag"])
+        self.movement_type_combo.currentTextChanged.connect(self.on_movement_type_changed)
+        self.movement_type_combo.setEnabled(False)  # Disabled by default (only for Custom)
+        movement_type_layout.addWidget(self.movement_type_combo)
+        
+        movement_type_group.setLayout(movement_type_layout)
+        layout.addWidget(movement_type_group)
         
         # Export Button
         export_group = QGroupBox("Export")
@@ -241,8 +272,37 @@ class ControlPanel(QWidget):
             "Saturation Attack (15 threats)": "saturation",
             "Custom": "custom"
         }
-        self.scenario_changed.emit(scenario_map.get(text, "custom"))
+        scenario = scenario_map.get(text, "custom")
         
+        # Enable/disable movement type dropdown based on scenario
+        is_custom = (scenario == "custom")
+        self.movement_type_combo.setEnabled(is_custom)
+        
+        self.scenario_changed.emit(scenario)
+        
+        # If custom scenario is selected, emit current movement type
+        if is_custom:
+            self.on_movement_type_changed(self.movement_type_combo.currentText())
+    
+    def on_movement_type_changed(self, text):
+        """Handle movement type selection change (only for Custom scenario)"""
+        if not self.movement_type_combo.isEnabled():
+            return  # Ignore if disabled
+        
+        movement_type_map = {
+            "Straight Line": "straight",
+            "Zigzag": "zigzag"
+        }
+        self.movement_type_changed.emit(movement_type_map.get(text, "straight"))
+        
+    def on_threat_type_changed(self, text):
+        """Handle threat type selection change"""
+        threat_type_map = {
+            "Missiles": "missiles",
+            "Drones": "drones"
+        }
+        self.threat_type_changed.emit(threat_type_map.get(text, "missiles"))
+    
     def on_export_clicked(self):
         """Handle export button click"""
         from PyQt6.QtWidgets import QFileDialog, QMessageBox

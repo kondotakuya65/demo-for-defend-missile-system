@@ -64,9 +64,13 @@ class Missile:
         self.detected = False
         
         # Visual properties
+        # Default to missile properties, can be overridden for drones
         self.length = config['models']['missile']['length']
         self.radius = config['models']['missile']['radius']
         self.color = np.array(config['models']['missile']['color'], dtype=np.float32)
+        
+        # Threat type (set by simulation engine)
+        self.threat_type = "missiles"  # "missiles" or "drones"
         
         # Trail for visualization
         self.trail: List[np.ndarray] = []

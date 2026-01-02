@@ -178,7 +178,12 @@ class RadarWidget(QWidget):
                 text_alpha = int(255 * (1.0 - progress / 0.7))
                 pen = QPen(QColor(255, 0, 0, text_alpha))
                 painter.setPen(pen)
-                text = "MISSILE MISSED"
+                # Show "DRONE MISSED" or "MISSILE MISSED" based on threat type
+                threat_type = getattr(self.simulation, 'threat_type', 'missiles')
+                if threat_type == "drones":
+                    text = "DRONE MISSED"
+                else:
+                    text = "MISSILE MISSED"
                 text_rect = painter.fontMetrics().boundingRect(text)
                 painter.drawText(
                     int(center_x - text_rect.width() / 2),
@@ -316,6 +321,17 @@ class RadarWidget(QWidget):
         }
         colors = phase_colors.get(phase, phase_colors['Tracing'])
         
+        # Get threat type (missiles or drones)
+        threat_type = getattr(missile, 'threat_type', 'missiles')
+        
+        # Visual differences: drones are smaller
+        if threat_type == "drones":
+            size_multiplier = 0.6  # Drones are 60% the size of missiles
+            dot_size = 4  # Smaller dot for drones
+        else:
+            size_multiplier = 1.0  # Missiles are full size
+            dot_size = 6  # Larger dot for missiles
+        
         # Draw missile trail if enabled
         if self.show_trails and hasattr(missile, 'trail') and len(missile.trail) > 1:
             pen = QPen(colors['trail'])
@@ -330,29 +346,30 @@ class RadarWidget(QWidget):
                 y2 = center_y + (p2[2] / self.radar_range) * radius
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
         
-        # Draw phase indicator ring (outer glow)
+        # Draw phase indicator ring (outer glow) - size varies by threat type
+        ring_size = int(6 * size_multiplier)
         brush = QBrush(QColor(colors['glow'].red(), colors['glow'].green(), colors['glow'].blue(), 80))
         painter.setBrush(brush)
         pen = QPen(colors['glow'])
         pen.setWidth(1)
         painter.setPen(pen)
-        painter.drawEllipse(QPointF(screen_x, screen_y), 6, 6)  # Outer ring
+        painter.drawEllipse(QPointF(screen_x, screen_y), ring_size, ring_size)  # Outer ring
         
-        # Draw missile dot with phase color
+        # Draw missile/drone dot with phase color - size varies by threat type
         brush = QBrush(colors['main'])
         painter.setBrush(brush)
         pen = QPen(colors['glow'])
         pen.setWidth(1)
         painter.setPen(pen)
-        painter.drawEllipse(QPointF(screen_x, screen_y), 4, 4)
+        painter.drawEllipse(QPointF(screen_x, screen_y), dot_size, dot_size)
         
         # Draw direction indicator (small line showing velocity direction)
         if np.linalg.norm(missile.velocity) > 0:
             vel = missile.velocity
             vel_2d = np.array([vel[0], vel[2]])  # Use X and Z components
-            vel_2d = vel_2d / np.linalg.norm(vel_2d) * 8  # Normalize and scale
+            vel_2d = vel_2d / np.linalg.norm(vel_2d) * (8 * size_multiplier)  # Scale by threat type
             pen = QPen(colors['direction'])
-            pen.setWidth(2)
+            pen.setWidth(max(1, int(2 * size_multiplier)))  # Thinner line for drones
             painter.setPen(pen)
             painter.drawLine(
                 int(screen_x), int(screen_y),

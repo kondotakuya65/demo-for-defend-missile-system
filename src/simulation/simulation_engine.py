@@ -105,8 +105,18 @@ class SimulationEngine:
             "single": "straight",
             "wave": "curved",
             "saturation": "zigzag",
-            "custom": "straight",
+            "custom": "straight",  # Default, can be overridden by custom_movement_pattern
         }
+        self.custom_movement_pattern = "straight"  # User-selected pattern for custom scenario
+        
+        # Threat type (missiles or drones)
+        self.threat_type = "missiles"  # "missiles" or "drones"
+        
+        # Processing performance tracking
+        self.detections_per_scan = 0  # Number of RF reflections detected in current scan
+        self.processing_time_per_scan = 0.0  # Processing time in ms for current scan
+        self.last_scan_time = None
+        self.scan_interval = 0.1  # Scan every 100ms
         
     def start(self, threat_count: int = None, seed: int = None):
         """Start simulation with given threat count
@@ -208,6 +218,52 @@ class SimulationEngine:
             self._spawn_single_missile(unique_seed)
             self.last_spawn_time = current_time
             active_missile_count = len([m for m in self.missiles if m.active and not m.destroyed])
+        
+        # Simulate radar scan and processing (every scan_interval)
+        if self.last_scan_time is None or (current_time - self.last_scan_time) >= self.scan_interval:
+            # Calculate detections per scan (RF reflections)
+            # Each active missile generates multiple reflections based on scenario
+            active_missile_count = len([m for m in self.missiles if m.active and not m.destroyed])
+            
+            # Base reflections per missile/drone (varies by scenario and threat type)
+            base_reflections_per_threat = {
+                "single": 5 if self.threat_type == "missiles" else 3,
+                "wave": 8 if self.threat_type == "missiles" else 5,
+                "saturation": 12 if self.threat_type == "missiles" else 8,
+                "custom": 6 if self.threat_type == "missiles" else 4,
+            }
+            base_reflections = base_reflections_per_threat.get(self.current_scenario, 6)
+            
+            # Add random variation (±20%)
+            import random
+            variation = random.uniform(0.8, 1.2)
+            self.detections_per_scan = int(active_missile_count * base_reflections * variation)
+            
+            # Calculate processing time per scan based on algorithm and detections
+            # Old algorithm: exponential growth with detections (slow)
+            # New algorithm: linear growth with detections (fast)
+            if self.algorithm_type == "old":
+                # Conventional: exponential growth - 1000-10000x slower
+                # Base time increases exponentially with detections
+                base_time_ms = 50.0  # Base processing time
+                # Exponential: time = base * (detections^1.5) / 10
+                self.processing_time_per_scan = base_time_ms * ((self.detections_per_scan ** 1.5) / 10.0)
+                # Add random variation
+                self.processing_time_per_scan *= random.uniform(0.9, 1.1)
+                # Cap at reasonable max (30 seconds)
+                self.processing_time_per_scan = min(30000.0, max(100.0, self.processing_time_per_scan))
+            else:  # new algorithm
+                # SA+H: linear growth - 1000-10000x faster
+                # Base time is much lower and grows linearly
+                base_time_ms = 0.05  # Base processing time (50 microseconds)
+                # Linear: time = base * detections
+                self.processing_time_per_scan = base_time_ms * self.detections_per_scan
+                # Add tiny random variation
+                self.processing_time_per_scan *= random.uniform(0.95, 1.05)
+                # Cap at reasonable max (50ms)
+                self.processing_time_per_scan = min(50.0, max(0.1, self.processing_time_per_scan))
+            
+            self.last_scan_time = current_time
         
         # Update missile phases first (needs current_time)
         self._update_phases(current_time)
@@ -336,12 +392,29 @@ class SimulationEngine:
                 np.random.uniform(-5, 5)
             ], dtype=np.float32)
             
-            speed = self.config['simulation']['default_speed'] * 3.0  # Realistic speed
+            # Speed varies by threat type: missiles are faster, drones are slower
+            if self.threat_type == "drones":
+                speed = self.config['simulation']['default_speed'] * 2.0  # Drones are slower
+            else:
+                speed = self.config['simulation']['default_speed'] * 3.0  # Missiles are faster
             
             # Get movement pattern based on scenario
-            movement_pattern = self.movement_patterns.get(self.current_scenario, "straight")
+            # For custom scenario, use user-selected pattern
+            if self.current_scenario == "custom":
+                movement_pattern = self.custom_movement_pattern
+            else:
+                movement_pattern = self.movement_patterns.get(self.current_scenario, "straight")
+            
+            # Drones tend to have more erratic movement (zigzag/spiral) even in simple scenarios
+            if self.threat_type == "drones" and movement_pattern == "straight" and self.current_scenario != "custom":
+                # Make drones slightly more erratic even in "straight" scenarios (but not for custom)
+                import random
+                if random.random() < 0.5:  # 50% chance for drones to zigzag even in simple scenarios
+                    movement_pattern = "zigzag"
             
             missile = Missile(start_pos, target_pos, speed, self.config, movement_pattern)
+            # Store threat type in missile for visual differences
+            missile.threat_type = self.threat_type
             self.missiles.append(missile)
             self.missiles_total_spawned += 1
         
@@ -350,7 +423,7 @@ class SimulationEngine:
             random.setstate(rng_state)
             np.random.set_state(np_rng_state)
             
-        print(f"[{self.algorithm_type}] Spawned {count} missiles")
+        # print(f"[{self.algorithm_type}] Spawned {count} missiles")
     
     def _spawn_single_missile(self, seed: int = None):
         """Spawn a single missile for continuous spawning with random position"""
@@ -661,6 +734,8 @@ class SimulationEngine:
                 for phase, times in self.phase_response_times.items()
             },
             'avg_interception_time': avg_interception_time,
-            'current_interception_times': current_times
+            'current_interception_times': current_times,
+            'detections_per_scan': self.detections_per_scan,
+            'processing_time_per_scan': self.processing_time_per_scan
         }
 
