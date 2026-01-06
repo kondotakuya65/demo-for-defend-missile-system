@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.metrics_panel, stretch=0)  # No stretch - fixed size
         
         # Processing Performance Graph (Bottom) - Large area for key demonstration
-        self.processing_graph = ProcessingPerformanceGraph()
+        self.processing_graph = ProcessingPerformanceGraph(self.config)
         main_layout.addWidget(self.processing_graph, stretch=0)  # Fixed size but larger
         
         # Initialize threat type in both simulation engines

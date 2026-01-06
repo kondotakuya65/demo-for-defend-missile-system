@@ -18,25 +18,65 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QBrush
 class ProcessingPerformanceGraph(QWidget):
     """Graph showing processing time vs detections per scan"""
     
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
         self.setMinimumSize(800, 300)
         self.setMaximumHeight(350)
+        
+        # Load config with defaults
+        self.config = config.get("graph", {}) if config else {}
+        self.x_axis_auto_scale = self.config.get("x_axis_auto_scale", False)
+        self.x_axis_fixed_max = self.config.get("x_axis_fixed_max", None)
+        self.y_axis_auto_scale = self.config.get("y_axis_auto_scale", True)
+        self.speed_multiplier = self.config.get("speed_multiplier", 100.0)
+        self.cycle_duration_min_ms = self.config.get("cycle_duration_min_ms", 10000)
+        self.cycle_duration_max_ms = self.config.get("cycle_duration_max_ms", 15000)
+        self.time_to_reach_xmax_ms = self.config.get("time_to_reach_xmax_ms", 180000)
+        self.y_axis_padding_factor = self.config.get("y_axis_padding_factor", 1.2)
+        self.target_steps_per_cycle = self.config.get("target_steps_per_cycle", 300)
+        
+        # Load scenario-based ratios and multipliers
+        self.base_ratio_by_scenario = self.config.get("base_ratio_by_scenario", {
+            "single": 1000,
+            "wave": 2500,
+            "saturation": 8000,
+            "custom": 2000
+        })
+        self.base_x_max_by_scenario = self.config.get("base_x_max_by_scenario", {
+            "single": 2000,
+            "wave": 5000,
+            "saturation": 10000,
+            "custom": 4000
+        })
+        ratio_mult = self.config.get("ratio_multipliers", {})
+        self.drone_ratio_multiplier = ratio_mult.get("drone_multiplier", 1.3)
+        self.threat_count_ratio_factor = ratio_mult.get("threat_count_factor", 0.15)
+        self.zigzag_ratio_multiplier = ratio_mult.get("zigzag_multiplier", 1.4)
+        self.min_ratio = ratio_mult.get("min_ratio", 1000.0)
+        self.max_ratio = ratio_mult.get("max_ratio", 10000.0)
+        
+        x_max_mult = self.config.get("x_max_multipliers", {})
+        self.threat_count_xmax_factor = x_max_mult.get("threat_count_factor", 0.2)
+        self.drone_xmax_multiplier = x_max_mult.get("drone_multiplier", 0.7)
+        self.zigzag_xmax_multiplier = x_max_mult.get("zigzag_multiplier", 1.2)
+        self.min_x_max = x_max_mult.get("min_x_max", 2000)
+        self.max_x_max = x_max_mult.get("max_x_max", 15000)
         
         # Virtual conditions (calculated once at simulation start)
         self.virtual_conditions = None
         self.is_initialized = False
         
-        # Current elapsed time (used to calculate current x position)
-        self.current_elapsed_time_ms = 0.0
-        
-        # Cycle management for repeated graph cycles
+        # Step-based cycle management
         self.cycle_start_time_ms = 0.0  # When current cycle started
-        self.cycle_duration_ms = random.uniform(10000, 15000)  # 10-15 seconds per cycle
+        self.cycle_duration_ms = random.uniform(self.cycle_duration_min_ms, self.cycle_duration_max_ms)
         self.cycle_count = 0  # Track number of cycles completed
         
-        # Speed multiplier - graphs progress much faster than real time
-        self.speed_multiplier = 100.0  # Process 100x faster than real time
+        # Step-based progression
+        self.total_steps_per_cycle = 0  # Total steps to reach x_max in one cycle
+        self.current_step = 0  # Current step index (0 to total_steps_per_cycle)
+        self.time_per_step_ms = 0.0  # Real time per step (ms)
+        self.last_step_time_ms = 0.0  # Last time we advanced a step
+        self.current_x_value = 0.0  # Current x value calculated from step
         
         # Axis ranges (will be set by virtual conditions and auto-scale)
         self.min_detections = 0
@@ -59,52 +99,45 @@ class ProcessingPerformanceGraph(QWidget):
             threat_type: "missiles" or "drones"
             movement_type: "straight" or "zigzag" (for custom scenario)
         """
-        # Calculate ratio (1000-10000x)
-        base_ratio_by_scenario = {
-            "single": 1000,
-            "wave": 2500,
-            "saturation": 8000,
-            "custom": 2000,
-        }
-        base_ratio = base_ratio_by_scenario.get(scenario, 2000)
+        # Calculate ratio (1000-10000x) using config values
+        base_ratio = self.base_ratio_by_scenario.get(scenario, 2000)
         
         # Adjust by threat type (drones are harder)
         if threat_type == "drones":
-            base_ratio *= 1.3
+            base_ratio *= self.drone_ratio_multiplier
         
         # Adjust by threat count (more threats = higher ratio)
-        threat_multiplier = 1.0 + (threat_count - 1) * 0.15
+        threat_multiplier = 1.0 + (threat_count - 1) * self.threat_count_ratio_factor
         ratio = base_ratio * threat_multiplier
         
         # Adjust by movement type (zigzag = more complex = higher ratio)
         if movement_type == "zigzag":
-            ratio *= 1.4
+            ratio *= self.zigzag_ratio_multiplier
         
-        # Clamp to 1000-10000x range
-        ratio = max(1000.0, min(10000.0, ratio))
+        # Clamp to configured range
+        ratio = max(self.min_ratio, min(self.max_ratio, ratio))
+        
         # Calculate X-max for 3 minutes (180000 ms)
-        # Base X-max varies by scenario complexity
-        base_x_max_by_scenario = {
-            "single": 2000,      # Lower detections for simple scenarios
-            "wave": 5000,         # Medium detections
-            "saturation": 10000,  # High detections
-            "custom": 4000,       # Medium-high for custom
-        }
-        base_x_max = base_x_max_by_scenario.get(scenario, 4000)
+        # Base X-max varies by scenario complexity (from config)
+        base_x_max = self.base_x_max_by_scenario.get(scenario, 4000)
         
         # Adjust by threat count (more threats = more detections)
-        x_max = int(base_x_max * (1.0 + (threat_count - 1) * 0.2))
+        x_max = int(base_x_max * (1.0 + (threat_count - 1) * self.threat_count_xmax_factor))
         
         # Adjust by threat type (drones generate fewer reflections)
         if threat_type == "drones":
-            x_max = int(x_max * 0.7)
+            x_max = int(x_max * self.drone_xmax_multiplier)
         
         # Adjust by movement type (zigzag = more reflections)
         if movement_type == "zigzag":
-            x_max = int(x_max * 1.2)
+            x_max = int(x_max * self.zigzag_xmax_multiplier)
         
-        # Clamp X-max to reasonable range
-        x_max = max(2000, min(15000, x_max))
+        # Clamp X-max to configured range
+        x_max = max(self.min_x_max, min(self.max_x_max, x_max))
+        
+        # Override x_max with config value if provided
+        if self.x_axis_fixed_max is not None:
+            x_max = self.x_axis_fixed_max
         
         # Calculate target Y values at x_max (after 3 minutes)
         # SA+H should reach 5~10 ms at x_max
@@ -165,17 +198,19 @@ class ProcessingPerformanceGraph(QWidget):
 
         a_new = a_old / v_ratio
         self.sa_h_coeffs = (a_new, b_new, c_new)
-        # Set initial axis ranges (will auto-scale)
+        # Set initial axis ranges
         self.min_detections = 0
-        self.max_detections = x_max
+        self.max_detections = x_max  # Fixed x-axis max
         self.min_processing_time = 0.01
-        self.max_processing_time = old_target * 1.2  # Initial max, will auto-scale
+        self.max_processing_time = old_target * self.y_axis_padding_factor  # Initial max, will auto-scale if enabled
         
         self.is_initialized = True
-        self.current_elapsed_time_ms = 0.0
         self.cycle_start_time_ms = 0.0
-        self.cycle_duration_ms = random.uniform(10000, 15000)  # 10-15 seconds per cycle
+        self.cycle_duration_ms = random.uniform(self.cycle_duration_min_ms, self.cycle_duration_max_ms)
         self.cycle_count = 0
+        
+        # Calculate step-based parameters for this cycle
+        self._calculate_cycle_steps(x_max, self.cycle_duration_ms)
         
         self.update()
     
@@ -183,13 +218,46 @@ class ProcessingPerformanceGraph(QWidget):
         """Reset graph and initialization"""
         self.is_initialized = False
         self.virtual_conditions = None
-        self.current_elapsed_time_ms = 0.0
         self.cycle_start_time_ms = 0.0
-        self.cycle_duration_ms = random.uniform(10000, 15000)
+        self.cycle_duration_ms = random.uniform(self.cycle_duration_min_ms, self.cycle_duration_max_ms)
         self.cycle_count = 0
+        self.current_step = 0
+        self.total_steps_per_cycle = 0
+        self.time_per_step_ms = 0.0
+        self.last_step_time_ms = 0.0
+        self.current_x_value = 0.0
         self.min_detections = 0
         self.max_detections = 5000
         self.update()
+    
+    def _calculate_cycle_steps(self, x_max: float, cycle_duration_ms: float):
+        """
+        Calculate step-based parameters for a cycle.
+        
+        Args:
+            x_max: Maximum x value for this cycle
+            cycle_duration_ms: Total duration of the cycle in milliseconds
+        """
+        # Determine total steps: use configurable target for smooth animation
+        # Higher number of steps = smoother animation
+        # Calculate how many steps we need based on cycle duration
+        # Use time_to_reach_xmax_ms as the reference time scale
+        if cycle_duration_ms > 0 and self.time_to_reach_xmax_ms > 0:
+            # Scale steps based on cycle duration relative to time_to_reach_xmax
+            duration_ratio = cycle_duration_ms / self.time_to_reach_xmax_ms
+            self.total_steps_per_cycle = max(10, int(self.target_steps_per_cycle * duration_ratio))
+        else:
+            self.total_steps_per_cycle = self.target_steps_per_cycle
+        
+        # Calculate time per step (real time, not accelerated)
+        if self.total_steps_per_cycle > 0:
+            self.time_per_step_ms = cycle_duration_ms / self.total_steps_per_cycle
+        else:
+            self.time_per_step_ms = cycle_duration_ms
+        
+        # Reset step tracking
+        self.current_step = 0
+        self.last_step_time_ms = 0.0
     
     def add_data_point(self, scenario: str, threat_count: int, threat_type: str, 
                       movement_type: str, elapsed_time_ms: float):
@@ -208,6 +276,7 @@ class ProcessingPerformanceGraph(QWidget):
         if not self.is_initialized:
             self.initialize_virtual_conditions(scenario, threat_count, threat_type, movement_type)
             self.cycle_start_time_ms = elapsed_time_ms
+            self.current_x_value = 0.0
         
         # Verify conditions match (if they don't, reinitialize)
         if self.virtual_conditions:
@@ -225,55 +294,63 @@ class ProcessingPerformanceGraph(QWidget):
         # Calculate cycle-relative time (time within current cycle)
         cycle_elapsed = elapsed_time_ms - self.cycle_start_time_ms
         
-        # Check if cycle should reset (10-15 seconds elapsed)
+        # Check if cycle should reset
         if cycle_elapsed >= self.cycle_duration_ms:
             # Start new cycle
             self.cycle_count += 1
             self.cycle_start_time_ms = elapsed_time_ms
-            self.cycle_duration_ms = random.uniform(10000, 15000)  # New random duration
-            cycle_elapsed = 0.0
-            # Reset axis ranges for new cycle
+            self.cycle_duration_ms = random.uniform(self.cycle_duration_min_ms, self.cycle_duration_max_ms)
+            # Reset axis ranges for new cycle (x-axis stays fixed)
             x_max = self.virtual_conditions["x_max"]
             self.min_detections = 0
-            self.max_detections = x_max
+            self.max_detections = x_max  # Fixed x-axis
             self.min_processing_time = 0.01
-            self.max_processing_time = self.virtual_conditions["old_target"] * 1.2
+            self.max_processing_time = self.virtual_conditions["old_target"] * self.y_axis_padding_factor
+            # Recalculate steps for new cycle
+            self._calculate_cycle_steps(x_max, self.cycle_duration_ms)
+            self.current_x_value = 0.0
+            cycle_elapsed = 0.0
         
-        # Accelerate time using speed multiplier (graphs progress much faster)
-        # This represents processing speed calculations, not missile movement
-        accelerated_time = cycle_elapsed * self.speed_multiplier
-        
-        # Store accelerated time for drawing
-        self.current_elapsed_time_ms = accelerated_time
-        
-        # Calculate current x_value for auto-scaling
+        # Step-based progression with smooth interpolation
         x_max = self.virtual_conditions["x_max"]
-        time_to_reach_xmax = 180000.0  # 3 minutes in ms (for full curve)
-        
-        if accelerated_time <= 0:
-            x_value = 0
-        elif accelerated_time <= time_to_reach_xmax:
-            progress = accelerated_time / time_to_reach_xmax
+        if self.total_steps_per_cycle > 0 and self.time_per_step_ms > 0:
+            # Calculate fractional step progress for smooth growth
+            fractional_steps = cycle_elapsed / self.time_per_step_ms
+            # Clamp to total steps to prevent overflow
+            fractional_steps = min(fractional_steps, self.total_steps_per_cycle)
+            
+            # Use fractional progress for smooth continuous growth
+            progress = fractional_steps / self.total_steps_per_cycle
             x_value = x_max * progress
+            
+            # Store current step (integer) for reference, but use fractional for smoothness
+            self.current_step = int(fractional_steps)
         else:
-            growth_rate = x_max / time_to_reach_xmax
-            extra_time = accelerated_time - time_to_reach_xmax
-            x_value = x_max + extra_time * growth_rate
+            self.current_step = 0
+            x_value = 0
         
-        # Auto-scale X-axis
-        if x_value > self.max_detections:
+        # Ensure x_value never exceeds x_max (safety check)
+        x_value = min(x_value, x_max, self.max_detections)
+        
+        # X-axis: Fixed (no auto-scaling) or auto-scale based on config
+        if self.x_axis_auto_scale and x_value > self.max_detections:
             self.max_detections = int(x_value * 1.1)  # 10% padding
+        # Otherwise, x-axis stays fixed at x_max
         
-        # Auto-scale Y-axis based on current values
-        a_sa, b_sa, c_sa = self.sa_h_coeffs
-        a_old, b_old, c_old = self.old_coeffs
+        # Y-axis: Auto-scale based on config
+        if self.y_axis_auto_scale:
+            a_sa, b_sa, c_sa = self.sa_h_coeffs
+            a_old, b_old, c_old = self.old_coeffs
+            
+            sa_h_y = a_sa * x_value * x_value + b_sa * x_value + c_sa
+            old_y = a_old * x_value * x_value + b_old * x_value + c_old
+            
+            max_time = max(sa_h_y, old_y)
+            if max_time > self.max_processing_time:
+                self.max_processing_time = max_time * self.y_axis_padding_factor
         
-        sa_h_y = a_sa * x_value * x_value + b_sa * x_value + c_sa
-        old_y = a_old * x_value * x_value + b_old * x_value + c_old
-        
-        max_time = max(sa_h_y, old_y)
-        if max_time > self.max_processing_time:
-            self.max_processing_time = max_time * 1.2  # 20% padding
+        # Store current x_value for drawing (for compatibility with paintEvent)
+        self.current_x_value = x_value
         
         self.update()
     
@@ -393,20 +470,13 @@ class ProcessingPerformanceGraph(QWidget):
         
         # Draw curves directly using quadratic equations
         if self.is_initialized and self.sa_h_coeffs and self.old_coeffs:
-            # Calculate current x_value from accelerated elapsed time
+            # Use step-based current_x_value (calculated in add_data_point)
+            # This ensures we never exceed x_max
+            current_x = getattr(self, 'current_x_value', 0)
             x_max = self.virtual_conditions["x_max"]
-            time_to_reach_xmax = 180000.0  # 3 minutes in ms (for full curve)
-            accelerated_time = self.current_elapsed_time_ms  # Already accelerated in add_data_point
             
-            if accelerated_time <= 0:
-                current_x = 0
-            elif accelerated_time <= time_to_reach_xmax:
-                progress = accelerated_time / time_to_reach_xmax
-                current_x = x_max * progress
-            else:
-                growth_rate = x_max / time_to_reach_xmax
-                extra_time = accelerated_time - time_to_reach_xmax
-                current_x = x_max + extra_time * growth_rate
+            # Safety: ensure current_x never exceeds x_max or max_detections
+            current_x = min(current_x, x_max, self.max_detections)
             
             # Draw curves from 0 to current_x
             # Conventional (Orange)
@@ -463,15 +533,13 @@ class ProcessingPerformanceGraph(QWidget):
         Draw curve directly using quadratic equation: y = a*x² + b*x + c
         No data points needed - just calculate and draw.
         """
-        if not coeffs or max_x <= min_x or max_y <= min_y:
+        if not coeffs or max_x <= min_x or max_y <= min_y or graph_width <= 0:
             return
         
-        a, b, c = coeffs
+        # Safety: clamp current_x to never exceed max_x
+        current_x = min(current_x, max_x)
         
-        # Calculate number of points for smooth curve (one point per pixel width)
-        num_points = int(graph_width)
-        if num_points < 2:
-            num_points = 2
+        a, b, c = coeffs
         
         pen = QPen(color, 2)
         painter.setPen(pen)
@@ -479,32 +547,59 @@ class ProcessingPerformanceGraph(QWidget):
         from PyQt6.QtCore import QLineF, QPointF
         points = []
         
-        # Draw curve from 0 to current_x
-        for i in range(num_points):
-            # Calculate x value (0 to current_x)
-            progress = i / (num_points - 1) if num_points > 1 else 0
-            x_val = current_x * progress
+        # Calculate fixed x-axis increment per pixel at start
+        # This ensures consistent step size regardless of current_x
+        x_axis_range = max_x - min_x
+        x_increment_per_pixel = x_axis_range / graph_width if graph_width > 0 else 0
+        
+        # Draw curve from 0 to current_x using fixed increment
+        # Iterate through pixel positions and calculate corresponding x values
+        for pixel_pos in range(int(graph_width) + 1):
+            # Calculate x value for this pixel position
+            x_val = min_x + pixel_pos * x_increment_per_pixel
+            
+            # Stop drawing if we've exceeded current_x
+            if x_val > current_x:
+                break
+            
+            # Ensure x_val doesn't exceed current_x or max_x (safety check)
+            x_val = min(x_val, current_x, max_x)
             
             # Calculate y value using quadratic equation: y = a*x² + b*x + c
             y_val = a * x_val * x_val + b * x_val + c
             y_val = max(min_y, min(max_y, y_val))  # Clamp to valid range
             
             # Map to screen coordinates
-            x_norm = (x_val - min_x) / (max_x - min_x) if max_x > min_x else 0.0
-            x_norm = max(0.0, min(1.0, x_norm))
+            x_norm = (x_val - min_x) / x_axis_range if x_axis_range > 0 else 0.0
+            x_norm = max(0.0, min(1.0, x_norm))  # Clamp to [0, 1]
             
             y_norm = (y_val - min_y) / (max_y - min_y) if max_y > min_y else 0.0
-            y_norm = max(0.0, min(1.0, y_norm))
+            y_norm = max(0.0, min(1.0, y_norm))  # Clamp to [0, 1]
             
             x_screen = graph_x + x_norm * graph_width
             y_screen = graph_y + graph_height - y_norm * graph_height  # Flip Y axis
             
+            # Ensure screen coordinates are within bounds
+            x_screen = max(graph_x, min(graph_x + graph_width, x_screen))
+            y_screen = max(graph_y, min(graph_y + graph_height, y_screen))
+            
             points.append((x_screen, y_screen))
         
-        # Draw lines connecting points
+        # Draw lines connecting points (only if we have at least 2 points)
+        if len(points) < 2:
+            return
+        
         for i in range(len(points) - 1):
-            line = QLineF(QPointF(points[i][0], points[i][1]), 
-                         QPointF(points[i+1][0], points[i+1][1]))
+            x1, y1 = points[i]
+            x2, y2 = points[i+1]
+            
+            # Clamp line endpoints to graph bounds
+            x1 = max(graph_x, min(graph_x + graph_width, x1))
+            x2 = max(graph_x, min(graph_x + graph_width, x2))
+            y1 = max(graph_y, min(graph_y + graph_height, y1))
+            y2 = max(graph_y, min(graph_y + graph_height, y2))
+            
+            line = QLineF(QPointF(x1, y1), QPointF(x2, y2))
             painter.drawLine(line)
         
         # Draw points (smaller, matching image style) - only draw some points for performance

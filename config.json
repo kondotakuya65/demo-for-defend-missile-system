@@ -64,6 +64,43 @@
     "trail_particle_count": 20,
     "explosion_duration": 1.0,
     "trail_fade_time": 2.0
+  },
+  "graph": {
+    "x_axis_auto_scale": false,
+    "x_axis_fixed_max": null,
+    "y_axis_auto_scale": true,
+    "speed_multiplier": 500.0,
+    "cycle_duration_min_ms": 5000,
+    "cycle_duration_max_ms": 10000,
+    "time_to_reach_xmax_ms": 180000,
+    "y_axis_padding_factor": 1.2,
+    "target_steps_per_cycle": 1000,
+    "base_ratio_by_scenario": {
+      "single": 1000,
+      "wave": 2500,
+      "saturation": 8000,
+      "custom": 2000
+    },
+    "base_x_max_by_scenario": {
+      "single": 2000,
+      "wave": 5000,
+      "saturation": 10000,
+      "custom": 4000
+    },
+    "ratio_multipliers": {
+      "drone_multiplier": 1.3,
+      "threat_count_factor": 0.15,
+      "zigzag_multiplier": 1.4,
+      "min_ratio": 1000.0,
+      "max_ratio": 10000.0
+    },
+    "x_max_multipliers": {
+      "threat_count_factor": 0.2,
+      "drone_multiplier": 0.7,
+      "zigzag_multiplier": 1.2,
+      "min_x_max": 2000,
+      "max_x_max": 15000
+    }
   }
 }
 
